@@ -209,6 +209,7 @@ def main_menu(user_id):
 def interval_menu(user_id):
     kb = InlineKeyboardMarkup(row_width=3)
     kb.add(
+        InlineKeyboardButton("1 min 🧪",  callback_data="interval_1"),
         InlineKeyboardButton("30 min",  callback_data="interval_30"),
         InlineKeyboardButton("60 min",  callback_data="interval_60"),
         InlineKeyboardButton("90 min",  callback_data="interval_90"),
