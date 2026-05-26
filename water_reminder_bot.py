@@ -19,7 +19,8 @@ import random
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ── Настройки ──────────────────────────────────────────────
-BOT_TOKEN = "8880294115:AAGeBCXKGWw6htwIl3F7FIkMPhwoW0bn0y0" # Получить у @BotFather
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")# Получить у @BotFather
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
