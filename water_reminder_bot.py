@@ -11,7 +11,7 @@ import random
 import os
 from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from water_stats_db import init_db, track, get_stats
+from Water_stats_db import init_db, track, get_stats
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
