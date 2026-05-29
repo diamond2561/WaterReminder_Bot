@@ -9,10 +9,16 @@ import time
 import threading
 import random
 import os
+from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from water_stats_db import init_db, track, get_stats
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
+
+ADMIN_ID = 8060415504  # Дмитрий @Diamond25362561
+
+init_db()
 
 # ── Переводы ───────────────────────────────────────────────
 TEXTS = {
@@ -179,7 +185,6 @@ TEXTS = {
 }
 
 # ── Хранилище пользователей ────────────────────────────────
-# { user_id: { "interval": 60, "active": False, "lang": "ru" } }
 users = {}
 
 def get_lang(user_id):
@@ -189,7 +194,6 @@ def t(user_id, key, **kwargs):
     lang = get_lang(user_id)
     text = TEXTS[lang].get(key, TEXTS["ru"][key])
     return text.format(**kwargs) if kwargs else text
-
 
 # ── Клавиатуры ──────────────────────────────────────────────
 def main_menu(user_id):
@@ -226,14 +230,16 @@ def lang_menu():
         ))
     return kb
 
-
 # ── Команды ─────────────────────────────────────────────────
 @bot.message_handler(commands=["start"])
 def cmd_start(message):
     user_id = message.from_user.id
-    name = message.from_user.first_name or "friend"
     if user_id not in users:
         users[user_id] = {"interval": 60, "active": False, "lang": "ru"}
+    # Трекаем запуск
+    track(user_id, message.from_user.username, message.from_user.first_name,
+          get_lang(user_id), "start")
+    name = message.from_user.first_name or "friend"
     bot.send_message(
         message.chat.id,
         t(user_id, "welcome", name=name),
@@ -260,6 +266,114 @@ def cmd_status(message):
         reply_markup=main_menu(user_id)
     )
 
+# ── /stats — только для админа ──────────────────────────────
+@bot.message_handler(commands=["stats"])
+def cmd_admin_stats(msg):
+    uid = msg.from_user.id
+    if uid != ADMIN_ID:
+        return
+
+    s = get_stats()
+
+    def delta(now, prev):
+        if prev == 0:
+            return f"↑ +{now}" if now > 0 else "—"
+        diff = now - prev
+        pct  = round(diff / prev * 100)
+        sign = "↑ +" if diff >= 0 else "↓ "
+        return f"{sign}{abs(diff)} ({abs(pct)}%)"
+
+    def bar(val, max_val, width=8):
+        if max_val == 0:
+            return "░" * width
+        filled = round(val / max_val * width)
+        return "█" * filled + "░" * (width - filled)
+
+    # Мини-график (последние 15 дней)
+    chart_data = s["daily_chart"][-15:]
+    max_day = max((v for _, v in chart_data), default=0)
+    chart_lines = []
+    for i in range(3, -1, -1):
+        row = ""
+        for _, v in chart_data:
+            level = round(v / max_day * 3) if max_day > 0 else 0
+            row += "▄" if level > i else " "
+        chart_lines.append(f"`{row}`")
+
+    # Популярные интервалы
+    interval_names = {
+        "30": "30 мин", "60": "1 час", "90": "1.5 часа",
+        "120": "2 часа", "180": "3 часа",
+    }
+    max_iv = max((n for _, n in s["top_intervals"]), default=0)
+    intervals_str = ""
+    for iv, cnt in s["top_intervals"]:
+        name = interval_names.get(iv, f"{iv} мин")
+        b = bar(cnt, max_iv)
+        intervals_str += f"  ⏱ {name}\n  `{b}` *{cnt}*\n"
+
+    # Языки
+    flags = {"ru": "🇷🇺", "en": "🇬🇧", "de": "🇩🇪", "fr": "🇫🇷", "ar": "🇸🇦"}
+    total_lang = sum(n for _, n in s["lang_stats"]) or 1
+    lang_lines = ""
+    for lang_code, cnt in s["lang_stats"]:
+        pct  = round(cnt / total_lang * 100)
+        b    = bar(cnt, total_lang)
+        flag = flags.get(lang_code, "🌍")
+        lang_lines += f"  {flag} `{b}` {pct}%\n"
+
+    # Последние пользователи
+    recent_str = ""
+    for fn, un, fs, lng in s["recent_users"]:
+        name  = fn or "—"
+        uname = f"@{un}" if un else "без username"
+        date  = fs[5:10].replace("-", ".") if fs else "?"
+        flag  = flags.get(lng, "🌍")
+        recent_str += f"  {flag} {name} ({uname}) — {date}\n"
+
+    # Retention: включили и не выключили (active users)
+    retention = 0
+    if s["reminders_started"] > 0:
+        retention = round((s["reminders_started"] - s["reminders_stopped"])
+                          / s["reminders_started"] * 100)
+        retention = max(0, min(100, retention))
+
+    ret_bar = bar(retention, 100, 10)
+
+    text = (
+        f"📊 *WaterReminderBot — последние 30 дней*\n"
+        f"_{datetime.now().strftime('%d.%m.%Y %H:%M')}_\n"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 *Пользователи*\n"
+        f"  Активных за 30 дн.: *{s['users_30']}* из {s['total_users']} всего\n"
+        f"  Новых за 30 дн.: *{s['new_30']}*  {delta(s['new_30'], s['new_prev'])}\n"
+        f"  Запросов за 30 дн.: *{s['requests_30']}*  {delta(s['requests_30'], s['requests_prev'])}\n"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Новые пользователи по дням* (посл. 15 дн.)\n"
+        + "\n".join(chart_lines) + "\n"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💧 *Напоминания за 30 дней*\n"
+        f"  ▶️ Включено: *{s['reminders_started']}* раз\n"
+        f"  ⏸ Выключено: *{s['reminders_stopped']}* раз\n"
+        f"  📨 Отправлено напоминаний: *{s['reminders_sent']}*\n"
+        f"  💧 Норм воды рассчитано: *{s['norm_calcs']}*\n"
+        f"  🔒 Retention: `{ret_bar}` *{retention}%*\n"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏱ *Популярные интервалы*\n"
+        f"{intervals_str if intervals_str else '  Нет данных'}"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌍 *Языки*\n"
+        f"{lang_lines}"
+        f"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆕 *Последние пользователи*\n"
+        f"{recent_str}"
+    )
+    bot.send_message(uid, text, parse_mode="Markdown")
 
 # ── Обработчик кнопок ───────────────────────────────────────
 @bot.callback_query_handler(func=lambda call: True)
@@ -274,10 +388,17 @@ def handle_callback(call):
 
     if call.data == "start_remind":
         u["active"] = True
-        bot.send_message(chat_id, t(user_id, "reminders_on", interval=u["interval"]), reply_markup=main_menu(user_id))
+        # Трекаем включение напоминаний
+        track(user_id, call.from_user.username, call.from_user.first_name,
+              get_lang(user_id), "reminders_on", str(u["interval"]))
+        bot.send_message(chat_id, t(user_id, "reminders_on", interval=u["interval"]),
+                         reply_markup=main_menu(user_id))
 
     elif call.data == "stop_remind":
         u["active"] = False
+        # Трекаем выключение
+        track(user_id, call.from_user.username, call.from_user.first_name,
+              get_lang(user_id), "reminders_off")
         bot.send_message(chat_id, t(user_id, "reminders_off"), reply_markup=main_menu(user_id))
 
     elif call.data == "change_interval":
@@ -287,14 +408,23 @@ def handle_callback(call):
         minutes = int(call.data.split("_")[1])
         u["interval"] = minutes
         u["active"] = True
-        bot.send_message(chat_id, t(user_id, "interval_set", interval=minutes), reply_markup=main_menu(user_id))
+        # Трекаем выбранный интервал
+        track(user_id, call.from_user.username, call.from_user.first_name,
+              get_lang(user_id), "interval_set", str(minutes))
+        bot.send_message(chat_id, t(user_id, "interval_set", interval=minutes),
+                         reply_markup=main_menu(user_id))
 
     elif call.data == "my_norm":
+        track(user_id, call.from_user.username, call.from_user.first_name,
+              get_lang(user_id), "norm_opened")
         msg = bot.send_message(chat_id, t(user_id, "enter_weight"))
         bot.register_next_step_handler(msg, process_weight)
 
     elif call.data == "about":
-        bot.send_message(chat_id, t(user_id, "about"), parse_mode="Markdown", reply_markup=main_menu(user_id))
+        track(user_id, call.from_user.username, call.from_user.first_name,
+              get_lang(user_id), "about_opened")
+        bot.send_message(chat_id, t(user_id, "about"), parse_mode="Markdown",
+                         reply_markup=main_menu(user_id))
 
     elif call.data == "change_lang":
         bot.send_message(chat_id, t(user_id, "choose_lang"), reply_markup=lang_menu())
@@ -303,8 +433,11 @@ def handle_callback(call):
         lang_code = call.data.split("_")[1]
         if lang_code in TEXTS:
             u["lang"] = lang_code
-            bot.send_message(chat_id, TEXTS[lang_code]["lang_set"], reply_markup=main_menu(user_id))
-
+            # Трекаем смену языка
+            track(user_id, call.from_user.username, call.from_user.first_name,
+                  lang_code, "lang_changed", lang_code)
+            bot.send_message(chat_id, TEXTS[lang_code]["lang_set"],
+                             reply_markup=main_menu(user_id))
 
 def process_weight(message):
     user_id = message.from_user.id
@@ -314,6 +447,9 @@ def process_weight(message):
             raise ValueError
         liters = round(weight * 0.033, 1)
         glasses = int(liters * 1000 / 250)
+        # Трекаем расчёт нормы
+        track(user_id, message.from_user.username, message.from_user.first_name,
+              get_lang(user_id), "norm_calculated", str(weight))
         bot.send_message(
             message.chat.id,
             t(user_id, "weight_result", weight=weight, liters=liters, glasses=glasses),
@@ -321,8 +457,8 @@ def process_weight(message):
             reply_markup=main_menu(user_id)
         )
     except (ValueError, AttributeError):
-        bot.send_message(message.chat.id, t(user_id, "weight_error"), reply_markup=main_menu(user_id))
-
+        bot.send_message(message.chat.id, t(user_id, "weight_error"),
+                         reply_markup=main_menu(user_id))
 
 # ── Фоновый поток: рассылка напоминаний ────────────────────
 def send_reminders():
@@ -342,6 +478,8 @@ def send_reminders():
             reminder = random.choice(TEXTS[lang]["reminders"])
             try:
                 bot.send_message(user_id, reminder)
+                # Трекаем отправленное напоминание
+                track(user_id, None, None, lang, "reminder_sent")
             except Exception:
                 users.pop(user_id, None)
 
@@ -351,12 +489,11 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(1)
 
-
 # ── Запуск ──────────────────────────────────────────────────
 if __name__ == "__main__":
     print("💧 WaterReminderBot (multilingual) запущен!")
+    print(f"📊 Статистика: /stats (только для admin ID {ADMIN_ID})")
     print("Языки: 🇷🇺 🇬🇧 🇩🇪 🇫🇷 🇸🇦")
-    print("Нажми Ctrl+C для остановки\n")
     scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
     scheduler_thread.start()
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
